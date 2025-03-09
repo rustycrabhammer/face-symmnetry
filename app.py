@@ -2,6 +2,7 @@ import streamlit as st
 import cv2
 import numpy as np
 from PIL import Image
+import io
 
 def analyze_face_frame(frame, face_cascade, eye_cascade):
     # Define regions (same as original)
@@ -111,59 +112,142 @@ def analyze_face_frame(frame, face_cascade, eye_cascade):
     
     return frame, None, None
 
+def process_uploaded_image(uploaded_file):
+    # Convert uploaded file to OpenCV format
+    file_bytes = np.asarray(bytearray(uploaded_file.read()), dtype=np.uint8)
+    frame = cv2.imdecode(file_bytes, cv2.IMREAD_COLOR)
+    return frame
+
 def main():
     st.title("Face Symmetry Analysis")
-    st.write("Analyze facial symmetry in real-time using your webcam")
+    st.write("Analyze facial symmetry using webcam or upload an image")
     
     # Initialize face and eye cascades
     face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
     eye_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_eye.xml')
     
-    # Create a placeholder for the webcam feed
+    # Add input method selection
+    input_method = st.radio("Choose Input Method", ["Webcam", "Upload Image"])
+    
+    # Create placeholders
     video_placeholder = st.empty()
     metrics_placeholder = st.empty()
+    error_placeholder = st.empty()
     
-    # Add a start/stop button
-    if 'running' not in st.session_state:
-        st.session_state.running = False
+    if input_method == "Upload Image":
+        # Image upload section
+        uploaded_file = st.file_uploader("Choose an image...", type=['jpg', 'jpeg', 'png'])
+        
+        if uploaded_file is not None:
+            try:
+                # Process the uploaded image
+                frame = process_uploaded_image(uploaded_file)
+                
+                # Analyze frame
+                processed_frame, symmetry_score, detailed_metrics = analyze_face_frame(frame, face_cascade, eye_cascade)
+                
+                # Convert BGR to RGB for display
+                rgb_frame = cv2.cvtColor(processed_frame, cv2.COLOR_BGR2RGB)
+                
+                # Display the processed image
+                video_placeholder.image(rgb_frame, channels="RGB", use_column_width=True)
+                
+                # Display metrics
+                if symmetry_score is not None:
+                    metrics_text = f"Overall Symmetry Score: {symmetry_score:.3f}\n\nDetailed Metrics:"
+                    if detailed_metrics:
+                        for region, metrics in detailed_metrics.items():
+                            metrics_text += f"\n\n{region}:"
+                            for metric_name, value in metrics.items():
+                                metrics_text += f"\n  {metric_name}: {value:.3f}"
+                    metrics_placeholder.text(metrics_text)
+                else:
+                    error_placeholder.error("No face detected in the image. Please try another image.")
+                    
+            except Exception as e:
+                error_placeholder.error(f"Error processing image: {str(e)}")
     
-    if st.button('Start' if not st.session_state.running else 'Stop'):
-        st.session_state.running = not st.session_state.running
-    
-    cap = cv2.VideoCapture(0)
-    cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
-    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
-    
-    try:
-        while st.session_state.running:
-            ret, frame = cap.read()
-            if not ret:
-                st.error("Failed to grab frame from camera")
-                break
+    else:
+        # Webcam section
+        # Add a start/stop button
+        if 'running' not in st.session_state:
+            st.session_state.running = False
             
-            frame = cv2.flip(frame, 1)
+        if 'camera_initialized' not in st.session_state:
+            st.session_state.camera_initialized = False
             
-            # Analyze frame
-            processed_frame, symmetry_score, detailed_metrics = analyze_face_frame(frame, face_cascade, eye_cascade)
+        if st.button('Start' if not st.session_state.running else 'Stop'):
+            st.session_state.running = not st.session_state.running
             
-            # Convert BGR to RGB for display
-            rgb_frame = cv2.cvtColor(processed_frame, cv2.COLOR_BGR2RGB)
-            
-            # Update the video feed
-            video_placeholder.image(rgb_frame, channels="RGB", use_column_width=True)
-            
-            # Display metrics
-            if symmetry_score is not None:
-                metrics_text = f"Overall Symmetry Score: {symmetry_score:.3f}\n\nDetailed Metrics:"
-                if detailed_metrics:
-                    for region, metrics in detailed_metrics.items():
-                        metrics_text += f"\n\n{region}:"
-                        for metric_name, value in metrics.items():
-                            metrics_text += f"\n  {metric_name}: {value:.3f}"
-                metrics_placeholder.text(metrics_text)
-    
-    finally:
-        cap.release()
+            # Reset camera initialization when stopping
+            if not st.session_state.running:
+                st.session_state.camera_initialized = False
+                if hasattr(st.session_state, 'cap'):
+                    st.session_state.cap.release()
+        
+        try:
+            if st.session_state.running:
+                if not st.session_state.camera_initialized:
+                    # Try different camera indices
+                    for camera_index in [0, 1, 2]:
+                        cap = cv2.VideoCapture(camera_index)
+                        if cap.isOpened():
+                            cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+                            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+                            st.session_state.cap = cap
+                            st.session_state.camera_initialized = True
+                            error_placeholder.empty()
+                            break
+                        cap.release()
+                    
+                    if not st.session_state.camera_initialized:
+                        error_placeholder.error("""
+                            Unable to access webcam. Please check:
+                            1. Your webcam is properly connected
+                            2. You've granted browser permission to access the webcam
+                            3. No other application is using the webcam
+                            4. Try refreshing the page
+                        """)
+                        st.session_state.running = False
+                        return
+                
+                # Capture and process frame
+                ret, frame = st.session_state.cap.read()
+                if not ret:
+                    error_placeholder.error("Failed to grab frame from camera")
+                    st.session_state.running = False
+                    return
+                
+                frame = cv2.flip(frame, 1)
+                
+                # Analyze frame
+                processed_frame, symmetry_score, detailed_metrics = analyze_face_frame(frame, face_cascade, eye_cascade)
+                
+                # Convert BGR to RGB for display
+                rgb_frame = cv2.cvtColor(processed_frame, cv2.COLOR_BGR2RGB)
+                
+                # Update the video feed
+                video_placeholder.image(rgb_frame, channels="RGB", use_column_width=True)
+                
+                # Display metrics
+                if symmetry_score is not None:
+                    metrics_text = f"Overall Symmetry Score: {symmetry_score:.3f}\n\nDetailed Metrics:"
+                    if detailed_metrics:
+                        for region, metrics in detailed_metrics.items():
+                            metrics_text += f"\n\n{region}:"
+                            for metric_name, value in metrics.items():
+                                metrics_text += f"\n  {metric_name}: {value:.3f}"
+                    metrics_placeholder.text(metrics_text)
+        
+        except Exception as e:
+            error_placeholder.error(f"Error: {str(e)}")
+            st.session_state.running = False
+            if hasattr(st.session_state, 'cap'):
+                st.session_state.cap.release()
+        
+        # Clean up when stopping
+        if not st.session_state.running and hasattr(st.session_state, 'cap'):
+            st.session_state.cap.release()
 
 if __name__ == "__main__":
     main()
